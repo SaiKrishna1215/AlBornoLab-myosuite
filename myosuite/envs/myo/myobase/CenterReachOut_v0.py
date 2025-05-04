@@ -16,24 +16,12 @@ class ReachEnvV0(BaseV0):
         "reach": 1.0,
         "bonus": 4.0,
         "penalty": 50,
+        # "twist_penalty": 2.0  # Optional: you can include this explicitly if needed
     }
 
     def __init__(self, model_path, obsd_model_path=None, seed=None, **kwargs):
-
-        # EzPickle.__init__(**locals()) is capturing the input dictionary of the init method of this class.
-        # In order to successfully capture all arguments we need to call gym.utils.EzPickle.__init__(**locals())
-        # at the leaf level, when we do inheritance like we do here.
-        # kwargs is needed at the top level to account for injection of __class__ keyword.
-        # Also see: https://github.com/openai/gym/pull/1497
         gym.utils.EzPickle.__init__(self, model_path, obsd_model_path, seed, **kwargs)
-
-        # This two step construction is required for pickling to work correctly. All arguments to all __init__
-        # calls must be pickle friendly. Things like sim / sim_obsd are NOT pickle friendly. Therefore we
-        # first construct the inheritance chain, which is just __init__ calls all the way down, with env_base
-        # creating the sim / sim_obsd instances. Next we run through "setup"  which relies on sim / sim_obsd
-        # created in __init__ to complete the setup.
         super().__init__(model_path=model_path, obsd_model_path=obsd_model_path, seed=seed, env_credits=self.MYO_CREDIT)
-
         self._setup(**kwargs)
 
     def _setup(self,
@@ -57,7 +45,7 @@ class ReachEnvV0(BaseV0):
                        **kwargs,
                        )
         keyFrame_id = 0 if self.obj_xyz_range is None else 1
-        self.init_qpos[:] = self.sim.model.key_qpos[keyFrame_id].copy() #Initial position for the hand
+        self.init_qpos[:] = self.sim.model.key_qpos[keyFrame_id].copy()
 
     def get_obs_vec(self):
         self.obs_dict['time'] = np.array([self.sim.data.time])
@@ -66,9 +54,8 @@ class ReachEnvV0(BaseV0):
         if self.sim.model.na > 0:
             self.obs_dict['act'] = self.sim.data.act[:].copy()
 
-        # reach error
-        obs_dict['obj_pos'] = sim.data.site_xpos[self.object_sid]
-        obs_dict['palm_pos'] = sim.data.site_xpos[self.palm_sid]
+        self.obs_dict['obj_pos'] = self.sim.data.site_xpos[self.object_sid]
+        self.obs_dict['palm_pos'] = self.sim.data.site_xpos[self.palm_sid]
         self.obs_dict['reach_err'] = np.array(self.obs_dict['palm_pos']) - np.array(self.obs_dict['obj_pos'])
 
         t, obs = self.obsdict2obsvec(self.obs_dict, self.obs_keys)
@@ -82,7 +69,6 @@ class ReachEnvV0(BaseV0):
         if sim.model.na > 0:
             obs_dict['act'] = sim.data.act[:].copy()
 
-        # reach error
         obs_dict['obj_pos'] = sim.data.site_xpos[self.object_sid]
         obs_dict['palm_pos'] = sim.data.site_xpos[self.palm_sid]
         obs_dict['reach_err'] = np.array(obs_dict['palm_pos']) - np.array(obs_dict['obj_pos'])
@@ -92,36 +78,38 @@ class ReachEnvV0(BaseV0):
         reach_dist = np.linalg.norm(obs_dict['reach_err'], axis=-1)
         act_mag = np.linalg.norm(self.obs_dict['act'], axis=-1) / self.sim.model.na if self.sim.model.na != 0 else 0
         far_th = self.far_th
-        near_th = 0.05 
+        near_th = 0.05
         drop = reach_dist > self.drop_th
+
+        # === Twist Penalty ===
+        # Adjust this index (3) to the correct joint index if needed
+        twist_angle = np.abs(obs_dict['hand_qpos'][3])
+        twist_penalty = -1.0 * twist_angle  # linear penalty
+
         rwd_dict = collections.OrderedDict((
-            # Optional Keys
             ('reach', -1. * reach_dist),
             ('bonus', 1. * (reach_dist < 2 * near_th) + 1. * (reach_dist < near_th)),
             ('act_reg', -1. * act_mag),
-            ('penalty', -1. * (reach_dist > far_th)),
+            ('penalty', -1. * (reach_dist > far_th) + twist_penalty),
             # Must keys
             ('sparse', -1. * reach_dist),
             ('solved', reach_dist < near_th),
             ('done', reach_dist < near_th),
         ))
+
         rwd_dict['dense'] = np.sum([wt * rwd_dict[key] for key, wt in self.rwd_keys_wt.items()], axis=0)
         return rwd_dict
-    
 
-    # generate a valid target
     def generate_target_pose(self):
         random_index = np.random.randint(0, len(self.obj_xyz_range))
         self.sim.model.body_pos[self.object_bid] = self.obj_xyz_range[random_index]
         self.current_object_pos = self.obj_xyz_range[random_index]
         self.sim.forward()
-    
-        
-    def reset(self, reset_qpos=None, reset_qvel=None):
 
-        # randomize init arms pose
+    def reset(self, reset_qpos=None, reset_qvel=None):
         if self.qpos_noise_range is not None:
-            reset_qpos_local = self.init_qpos + self.qpos_noise_range*(self.sim.model.jnt_range[:,1]-self.sim.model.jnt_range[:,0])
+            reset_qpos_local = self.init_qpos + self.qpos_noise_range * (
+                self.sim.model.jnt_range[:, 1] - self.sim.model.jnt_range[:, 0])
             reset_qpos_local[-6:] = self.init_qpos[-6:]
         else:
             reset_qpos_local = reset_qpos
